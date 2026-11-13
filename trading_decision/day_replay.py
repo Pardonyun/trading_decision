@@ -170,6 +170,8 @@ def settle_day(decision: FrozenDecision, actual_prices: Sequence[HourlyPrice]) -
     """Settle a previously frozen plan with the supplied actual prices."""
     ordered = _ordered_curve(actual_prices, decision.operating_day)
     validation = validate_plan(decision.power_mw, decision.starting_soc)
+    if validation.ending_soc != decision.ending_soc:
+        raise ValueError("frozen ending SOC does not match the validated plan")
     actual = tuple(row.price for row in ordered)
     revenue = sum((price * power for price, power in zip(actual, decision.power_mw)), Decimal(0))
     return DayResult(

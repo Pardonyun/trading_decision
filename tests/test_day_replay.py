@@ -46,17 +46,19 @@ class DayReplayTests(unittest.TestCase):
         result = replay_day(
             DAY,
             DEADLINE,
-            prices(DAY - timedelta(days=7), HISTORY_PUBLICATION, 30),
-            prices(DAY, ACTUAL_PUBLICATION, 50),
+            prices(DAY - timedelta(days=7), HISTORY_PUBLICATION, 30)[::-1],
+            prices(DAY, ACTUAL_PUBLICATION, 50)[::-1],
             Decimal("0.05"),
         )
 
         self.assertEqual(result.decision.operating_day, DAY)
         self.assertEqual(result.decision.forecast_source_day, DAY - timedelta(days=7))
         self.assertEqual(result.decision.forecast_prices, tuple(Decimal(i) for i in range(30, 54)))
+        self.assertEqual(result.settlement_prices, tuple(Decimal(i) for i in range(50, 74)))
         self.assertEqual(result.decision.power_mw, (Decimal(0),) * 24)
         self.assertTrue(result.decision.plan_valid)
         self.assertEqual(result.decision.starting_soc, Decimal("0.05"))
+        self.assertEqual(result.decision.ending_soc, Decimal("0.05"))
         self.assertEqual(result.daily_revenue, Decimal(0))
         self.assertEqual(result.next_starting_soc, Decimal("0.05"))
         self.assertEqual(result.decision.data_visible_before_utc.isoformat(), "2026-11-10T18:00:00+00:00")
@@ -65,14 +67,16 @@ class DayReplayTests(unittest.TestCase):
         source_day = DAY - timedelta(days=7)
         timely = prices(source_day, HISTORY_PUBLICATION, 30)
         late = prices(source_day, ACTUAL_PUBLICATION, 900)
-        frozen = freeze_decision(DAY, DEADLINE, timely + late, Decimal("0.05"))
-        first = settle_day(frozen, prices(DAY, ACTUAL_PUBLICATION, 50))
-        second = settle_day(frozen, prices(DAY, ACTUAL_PUBLICATION, -100))
+        first = replay_day(
+            DAY, DEADLINE, timely + late, prices(DAY, ACTUAL_PUBLICATION, 50), Decimal("0.05")
+        )
+        second = replay_day(
+            DAY, DEADLINE, timely + late, prices(DAY, ACTUAL_PUBLICATION, -100), Decimal("0.05")
+        )
 
         self.assertEqual(first.decision, second.decision)
-        self.assertEqual(frozen.forecast_prices, tuple(Decimal(i) for i in range(30, 54)))
-        self.assertEqual(frozen.ignored_after_cutoff_count, 24)
-        self.assertEqual(first.daily_revenue, second.daily_revenue)
+        self.assertEqual(first.decision.forecast_prices, tuple(Decimal(i) for i in range(30, 54)))
+        self.assertEqual(first.decision.ignored_after_cutoff_count, 24)
 
     def test_price_published_at_the_deadline_is_not_visible(self) -> None:
         source_day = DAY - timedelta(days=7)
@@ -129,6 +133,14 @@ class DayReplayTests(unittest.TestCase):
         self.assertEqual(result.daily_revenue, Decimal("-1.1000"))
         self.assertEqual(result.next_starting_soc, Decimal("0.05"))
 
+    def test_settlement_rejects_a_frozen_record_with_inconsistent_ending_soc(self) -> None:
+        frozen = freeze_decision(
+            DAY, DEADLINE, prices(DAY - timedelta(days=7), HISTORY_PUBLICATION, 30), Decimal("0.05")
+        )
+        inconsistent = replace(frozen, ending_soc=Decimal("0.95"))
+        with self.assertRaisesRegex(ValueError, "ending SOC"):
+            settle_day(inconsistent, prices(DAY, ACTUAL_PUBLICATION, 50))
+
     def test_last_hour_is_checked(self) -> None:
         with self.assertRaisesRegex(ValueError, "period 24"):
             validate_plan((Decimal(0),) * 23 + (Decimal("-1"),), Decimal("0.95"))
@@ -143,6 +155,13 @@ class DayReplayTests(unittest.TestCase):
         self.assertEqual(first.stdout, second.stdout)
         self.assertEqual(output["forecast_prices"], list(range(30, 54)))
         self.assertEqual(output["power_mw"], [0] * 24)
+        self.assertEqual(output["operating_day"], "2026-11-11")
+        self.assertEqual(output["deadline_beijing"], "2026-11-11T02:00:00+08:00")
+        self.assertEqual(output["data_visible_before_utc"], "2026-11-10T18:00:00+00:00")
+        self.assertEqual(output["latest_historical_publication_utc"], "2026-11-04T21:00:00+00:00")
+        self.assertTrue(output["plan_valid"])
+        self.assertEqual(output["starting_soc"], 0.05)
+        self.assertEqual(output["ending_soc"], 0.05)
         self.assertEqual(output["daily_revenue"], 0)
         self.assertEqual(output["next_starting_soc"], 0.05)
 

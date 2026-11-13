@@ -1,1 +1,2 @@
 tzdata; platform_system == "Windows"
+scipy>=1.14,<2

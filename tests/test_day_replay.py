@@ -4,6 +4,7 @@ import unittest
 import json
 import subprocess
 import sys
+import tempfile
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -42,7 +43,7 @@ def prices(
 
 
 class DayReplayTests(unittest.TestCase):
-    def test_complete_day_uses_d_minus_7_and_keeps_initial_soc(self) -> None:
+    def test_complete_day_uses_d_minus_7_to_make_a_valid_trading_plan(self) -> None:
         result = replay_day(
             DAY,
             DEADLINE,
@@ -55,12 +56,15 @@ class DayReplayTests(unittest.TestCase):
         self.assertEqual(result.decision.forecast_source_day, DAY - timedelta(days=7))
         self.assertEqual(result.decision.forecast_prices, tuple(Decimal(i) for i in range(30, 54)))
         self.assertEqual(result.settlement_prices, tuple(Decimal(i) for i in range(50, 74)))
-        self.assertEqual(result.decision.power_mw, (Decimal(0),) * 24)
+        self.assertEqual(len(result.decision.power_mw), 24)
+        self.assertLess(result.decision.power_mw[0], 0)
+        self.assertGreater(result.decision.power_mw[-1], 0)
         self.assertTrue(result.decision.plan_valid)
+        self.assertEqual(result.decision.solver_status, "optimal")
+        self.assertIsNone(result.decision.fallback_reason)
         self.assertEqual(result.decision.starting_soc, Decimal("0.05"))
-        self.assertEqual(result.decision.ending_soc, Decimal("0.05"))
-        self.assertEqual(result.daily_revenue, Decimal(0))
-        self.assertEqual(result.next_starting_soc, Decimal("0.05"))
+        self.assertGreater(result.daily_revenue, Decimal(0))
+        self.assertEqual(result.next_starting_soc, result.decision.ending_soc)
         self.assertEqual(result.decision.data_visible_before_utc.isoformat(), "2026-11-10T18:00:00+00:00")
 
     def test_late_history_and_changed_actual_prices_do_not_change_frozen_decision(self) -> None:
@@ -124,6 +128,7 @@ class DayReplayTests(unittest.TestCase):
         traded = replace(
             frozen,
             power_mw=(Decimal("-1"), Decimal("0.7225")) + (Decimal(0),) * 22,
+            ending_soc=Decimal("0.05"),
         )
         actual = list(prices(DAY, ACTUAL_PUBLICATION, 0))
         actual[0] = replace(actual[0], price=Decimal(30))
@@ -154,16 +159,41 @@ class DayReplayTests(unittest.TestCase):
 
         self.assertEqual(first.stdout, second.stdout)
         self.assertEqual(output["forecast_prices"], list(range(30, 54)))
-        self.assertEqual(output["power_mw"], [0] * 24)
+        self.assertEqual(len(output["power_mw"]), 24)
+        self.assertLess(output["power_mw"][0], 0)
+        self.assertGreater(output["power_mw"][-1], 0)
         self.assertEqual(output["operating_day"], "2026-11-11")
         self.assertEqual(output["deadline_beijing"], "2026-11-11T02:00:00+08:00")
         self.assertEqual(output["data_visible_before_utc"], "2026-11-10T18:00:00+00:00")
         self.assertEqual(output["latest_historical_publication_utc"], "2026-11-04T21:00:00+00:00")
         self.assertTrue(output["plan_valid"])
+        self.assertEqual(output["solver_status"], "optimal")
+        self.assertIsNone(output["fallback_reason"])
+        self.assertEqual(output["power_decimal_places"], 4)
+        self.assertEqual(len(output["hourly_ending_soc"]), 24)
         self.assertEqual(output["starting_soc"], 0.05)
-        self.assertEqual(output["ending_soc"], 0.05)
-        self.assertEqual(output["daily_revenue"], 0)
-        self.assertEqual(output["next_starting_soc"], 0.05)
+        self.assertGreater(output["predicted_revenue"], 0)
+        self.assertGreater(output["daily_revenue"], 0)
+        self.assertEqual(output["next_starting_soc"], output["ending_soc"])
+
+    def test_cli_json_stays_parseable_for_volatile_prices(self) -> None:
+        example = Path(__file__).resolve().parents[1] / "examples" / "known_prices.json"
+        payload = json.loads(example.read_text(encoding="utf-8"))
+        payload["starting_soc"] = 0.95
+        payload["historical_curves"][0]["prices"] = [
+            -2, 64, 121, 52, 74, 43, -74, 58, 149, 140, 107, 29,
+            -31, 10, 62, 84, 83, -40, 139, -23, 11, -34, 33, -23,
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "volatile.json"
+            input_path.write_text(json.dumps(payload), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-m", "trading_decision", str(input_path)],
+                capture_output=True, text=True, check=True,
+            )
+        output = json.loads(result.stdout)
+        self.assertEqual(output["solver_status"], "optimal")
+        self.assertEqual(len(output["power_mw"]), 24)
 
 
 if __name__ == "__main__":

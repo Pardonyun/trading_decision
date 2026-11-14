@@ -8,7 +8,7 @@ import json
 import os
 import sys
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -37,22 +37,17 @@ def _quiet_native_solver_output():
 
 
 def _curve_rows(curve: dict[str, Any]) -> tuple[HourlyPrice, ...]:
-    starts = curve["market_interval_starts"]
     prices = curve["prices"]
-    if len(starts) != 24 or len(prices) != 24:
-        raise ValueError("each sample curve needs 24 market starts and 24 prices")
+    if len(prices) != 24:
+        raise ValueError("each sample curve needs exactly 24 prices")
     day = date.fromisoformat(curve["operating_day"])
-    published = datetime.fromisoformat(curve["published_at"])
     return tuple(
         HourlyPrice(
             operating_day=day,
             platform_period=period,
-            market_interval_start=datetime.fromisoformat(start),
             price=Decimal(str(price)),
-            published_at=published,
-            source=curve["source"],
         )
-        for period, (start, price) in enumerate(zip(starts, prices, strict=True), 1)
+        for period, price in enumerate(prices, 1)
     )
 
 
@@ -67,9 +62,6 @@ def _output(result: DayResult) -> dict[str, Any]:
     )
     return {
         "operating_day": decision.operating_day.isoformat(),
-        "deadline_beijing": decision.deadline_beijing.isoformat(),
-        "data_visible_before_utc": decision.data_visible_before_utc.isoformat(),
-        "latest_historical_publication_utc": decision.latest_historical_publication_utc.isoformat(),
         "forecast_source_day": decision.forecast_source_day.isoformat(),
         "forecast_prices": [_number(value) for value in decision.forecast_prices],
         "power_mw": [_number(value) for value in decision.power_mw],
@@ -85,9 +77,7 @@ def _output(result: DayResult) -> dict[str, Any]:
         "starting_soc": _number(decision.starting_soc),
         "ending_soc": _number(decision.ending_soc),
         "hourly_ending_soc": [_number(value) for value in validation.hourly_ending_soc],
-        "ignored_after_cutoff_count": decision.ignored_after_cutoff_count,
         "settlement_prices": [_number(value) for value in result.settlement_prices],
-        "latest_actual_publication_utc": result.latest_actual_publication_utc.isoformat(),
         "daily_revenue": _number(result.daily_revenue),
         "next_starting_soc": _number(result.next_starting_soc),
     }
@@ -110,7 +100,6 @@ def main() -> int:
         with _quiet_native_solver_output():
             decision = freeze_decision(
                 date.fromisoformat(payload["operating_day"]),
-                datetime.fromisoformat(payload["deadline_beijing"]),
                 historical,
                 Decimal(str(payload["starting_soc"])),
                 power_decimal_places=arguments.power_decimal_places,

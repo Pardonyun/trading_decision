@@ -1,7 +1,7 @@
 """Public behavior of the D−7 storage decision and independent plan validator."""
 
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from trading_decision.day_replay import HourlyPrice, freeze_decision, settle_day, validate_plan
@@ -9,15 +9,11 @@ from trading_decision.storage_optimizer import OptimizationResult, optimize_plan
 
 
 DAY = date(2026, 11, 11)
-DEADLINE = datetime.fromisoformat("2026-11-11T02:00:00+08:00")
-PUBLISHED = datetime.fromisoformat("2026-11-04T21:00:00+00:00")
-ACTUAL_PUBLISHED = datetime.fromisoformat("2026-11-10T21:00:00+00:00")
 
 
-def curve(day: date, published_at: datetime, values: tuple[int | Decimal, ...]) -> tuple[HourlyPrice, ...]:
-    start = datetime.fromisoformat(f"{day}T00:00:00-08:00")
+def curve(day: date, values: tuple[int | Decimal, ...]) -> tuple[HourlyPrice, ...]:
     return tuple(
-        HourlyPrice(day, period, start + timedelta(hours=period - 1), Decimal(price), published_at, "test")
+        HourlyPrice(day, period, Decimal(price))
         for period, price in enumerate(values, 1)
     )
 
@@ -61,14 +57,14 @@ class StorageOptimizerTests(unittest.TestCase):
     def test_negative_forecast_revenue_from_candidate_prefers_zero_plan(self) -> None:
         marginal_sale_price = Decimal(1) / Decimal("0.7225") + Decimal("0.0000003")
         forecast = (Decimal(1),) * 3 + (marginal_sale_price,) * 2 + (Decimal(0),) * 19
-        history = curve(DAY - timedelta(days=7), PUBLISHED, forecast)
+        history = curve(DAY - timedelta(days=7), forecast)
         losing_plan = (
             Decimal("-6.5386"), Decimal(-7), Decimal(0), Decimal(7),
             Decimal("2.7816"),
         ) + (Decimal(0),) * 19
         self.assertLess(sum((price * power for price, power in zip(forecast, losing_plan)), Decimal(0)), 0)
         frozen = freeze_decision(
-            DAY, DEADLINE, history, Decimal("0.05"),
+            DAY, history, Decimal("0.05"),
             optimizer=lambda _prices, _soc: OptimizationResult(losing_plan, "optimal", None, Decimal(1)),
         )
         self.assertEqual(frozen.power_mw, (Decimal(0),) * 24)
@@ -90,8 +86,8 @@ class StorageOptimizerTests(unittest.TestCase):
 
     def test_last_hour_charge_is_kept_as_next_day_soc(self) -> None:
         frozen = freeze_decision(
-            DAY, DEADLINE,
-            curve(DAY - timedelta(days=7), PUBLISHED, (0,) * 23 + (-100,)),
+            DAY,
+            curve(DAY - timedelta(days=7), (0,) * 23 + (-100,)),
             Decimal("0.05"),
         )
         validation = validate_plan(frozen.power_mw, Decimal("0.05"))
@@ -104,8 +100,8 @@ class StorageOptimizerTests(unittest.TestCase):
             -40, 51, 39, -67, -6, 134, 54, 21, 60, 48, -84, 55,
             -97, 132, 114, 20, -34, 41, -41, -51, 83, 20, 38, 114,
         )
-        history = curve(DAY - timedelta(days=7), PUBLISHED, forecast)
-        frozen = freeze_decision(DAY, DEADLINE, history, Decimal("0.05"))
+        history = curve(DAY - timedelta(days=7), forecast)
+        frozen = freeze_decision(DAY, history, Decimal("0.05"))
         self.assertEqual(frozen.solver_status, "optimal")
         self.assertIsNone(frozen.fallback_reason)
         self.assertNotEqual(frozen.power_mw, (Decimal(0),) * 24)
@@ -113,10 +109,10 @@ class StorageOptimizerTests(unittest.TestCase):
 
     def test_freeze_then_settle_uses_actual_prices_only_for_revenue(self) -> None:
         forecast = (-100,) + (0,) * 23
-        history = curve(DAY - timedelta(days=7), PUBLISHED, forecast)
-        frozen = freeze_decision(DAY, DEADLINE, history, Decimal("0.05"))
-        first = settle_day(frozen, curve(DAY, ACTUAL_PUBLISHED, (10,) + (0,) * 23))
-        second = settle_day(frozen, curve(DAY, ACTUAL_PUBLISHED, (-20,) + (0,) * 23))
+        history = curve(DAY - timedelta(days=7), forecast)
+        frozen = freeze_decision(DAY, history, Decimal("0.05"))
+        first = settle_day(frozen, curve(DAY, (10,) + (0,) * 23))
+        second = settle_day(frozen, curve(DAY, (-20,) + (0,) * 23))
         self.assertEqual(first.decision, second.decision)
         self.assertEqual(frozen.power_mw[0], Decimal(-7))
         self.assertEqual(first.daily_revenue, Decimal(-70))
@@ -128,7 +124,7 @@ class StorageOptimizerTests(unittest.TestCase):
             raise RuntimeError("solver crashed")
 
         frozen = freeze_decision(
-            DAY, DEADLINE, curve(DAY - timedelta(days=7), PUBLISHED, (0,) * 24),
+            DAY, curve(DAY - timedelta(days=7), (0,) * 24),
             Decimal("0.05"), optimizer=broken,
         )
         self.assertEqual(frozen.power_mw, (Decimal(0),) * 24)
@@ -139,7 +135,7 @@ class StorageOptimizerTests(unittest.TestCase):
         self.assertTrue(frozen.plan_valid)
 
     def test_timeout_and_invalid_rounded_candidate_return_zero_plan(self) -> None:
-        history = curve(DAY - timedelta(days=7), PUBLISHED, (0,) * 24)
+        history = curve(DAY - timedelta(days=7), (0,) * 24)
         for result, expected_status in (
             (OptimizationResult(None, "time_limit", "limit reached", None), "time_limit"),
             (OptimizationResult(None, "no_solution", "no feasible incumbent", None), "no_solution"),
@@ -147,7 +143,7 @@ class StorageOptimizerTests(unittest.TestCase):
                                 "optimal", None, Decimal(1)), "optimal"),
         ):
             with self.subTest(status=expected_status, candidate=result.power_mw):
-                frozen = freeze_decision(DAY, DEADLINE, history, Decimal("0.05"),
+                frozen = freeze_decision(DAY, history, Decimal("0.05"),
                                          optimizer=lambda _prices, _soc: result)
                 self.assertEqual(frozen.power_mw, (Decimal(0),) * 24)
                 self.assertEqual(frozen.solver_status, expected_status)
@@ -155,12 +151,12 @@ class StorageOptimizerTests(unittest.TestCase):
                 self.assertTrue(frozen.plan_valid)
 
     def test_last_hour_precision_overflow_falls_back_at_upper_soc(self) -> None:
-        history = curve(DAY - timedelta(days=7), PUBLISHED, (0,) * 24)
+        history = curve(DAY - timedelta(days=7), (0,) * 24)
         invalid = OptimizationResult(
             (Decimal(0),) * 23 + (Decimal("-0.00011"),), "optimal", None, Decimal(0)
         )
         frozen = freeze_decision(
-            DAY, DEADLINE, history, Decimal("0.95"),
+            DAY, history, Decimal("0.95"),
             optimizer=lambda _prices, _soc: invalid,
         )
         self.assertEqual(frozen.power_mw, (Decimal(0),) * 24)
@@ -168,9 +164,9 @@ class StorageOptimizerTests(unittest.TestCase):
         self.assertIn("period 24", frozen.fallback_reason or "")
 
     def test_submission_precision_can_be_set_per_decision(self) -> None:
-        history = curve(DAY - timedelta(days=7), PUBLISHED, (-100,) + (0,) * 23)
+        history = curve(DAY - timedelta(days=7), (-100,) + (0,) * 23)
         frozen = freeze_decision(
-            DAY, DEADLINE, history, Decimal("0.05"), power_decimal_places=2
+            DAY, history, Decimal("0.05"), power_decimal_places=2
         )
         self.assertEqual(frozen.power_decimal_places, 2)
         self.assertEqual(frozen.power_mw[0], Decimal(-7))
